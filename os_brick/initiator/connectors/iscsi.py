@@ -57,7 +57,13 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
             device_scan_attempts=device_scan_attempts,
             transport=transport, *args, **kwargs)
         self.use_multipath = use_multipath
-        self.transport = self._validate_iface_transport(transport)
+        # We may have a comma-separated list of interface names
+        ifaces = []
+        for iface in transport.split(','):
+            valid_iface = self._validate_iface_transport(iface)
+            if valid_iface not in ifaces:
+                ifaces.append(valid_iface)
+        self.transport = ifaces
 
     @staticmethod
     def get_connector_properties(root_helper, *args, **kwargs):
@@ -363,19 +369,18 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
         iqns = []
 
         if info:
-            iscsi_transport = ('iser' if self._get_transport() == 'iser'
-                               else 'default')
-            iface = 'Iface Name: ' + iscsi_transport
             current_iqn = ''
             current_ip = ''
+            current_iface = ''
             for line in info.group(1).splitlines():
                 line = line.strip()
                 if line.startswith('Target:'):
                     current_iqn = line[8:]
                 elif line.startswith('Portal:'):
                     current_ip = line[8:].split(',')[0]
-                elif line.startswith(iface):
-                    if current_iqn and current_ip:
+                elif line.startswith('Iface Name:'):
+                    if ( line.split()[1] in self._get_transport()
+                         and current_iqn and current_ip ):
                         iqns.append(current_iqn)
                         ips.append(current_ip)
                     current_ip = ''
@@ -389,56 +394,60 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
 
     def _discover_iscsi_portals(self, connection_properties):
         out = None
-        iscsi_transport = ('iser' if self._get_transport() == 'iser'
-                           else 'default')
-        if connection_properties.get('discovery_auth_method'):
-            try:
-                self._run_iscsiadm_update_discoverydb(connection_properties,
-                                                      iscsi_transport)
-            except putils.ProcessExecutionError as exception:
-                # iscsiadm returns 6 for "db record not found"
-                if exception.exit_code == 6:
-                    # Create a new record for this target and update the db
-                    self._run_iscsiadm_bare(
-                        ['-m', 'discoverydb',
-                         '-t', 'sendtargets',
-                         '-p', connection_properties['target_portal'],
-                         '-I', iscsi_transport,
-                         '--op', 'new'],
-                        check_exit_code=[0, 255])
-                    self._run_iscsiadm_update_discoverydb(
-                        connection_properties
-                    )
-                else:
-                    LOG.error("Unable to find target portal: "
-                              "%(target_portal)s.",
-                              {'target_portal': connection_properties[
-                                  'target_portal']})
-                    raise
-            old_node_startups = self._get_node_startup_values(
-                connection_properties)
-            out = self._run_iscsiadm_bare(
-                ['-m', 'discoverydb',
-                 '-t', 'sendtargets',
-                 '-I', iscsi_transport,
-                 '-p', connection_properties['target_portal'],
-                 '--discover'],
-                check_exit_code=[0, 255])[0] or ""
-            self._recover_node_startup_values(connection_properties,
-                                              old_node_startups)
-        else:
-            old_node_startups = self._get_node_startup_values(
-                connection_properties)
-            out = self._run_iscsiadm_bare(
-                ['-m', 'discovery',
-                 '-t', 'sendtargets',
-                 '-I', iscsi_transport,
-                 '-p', connection_properties['target_portal']],
-                check_exit_code=[0, 255])[0] or ""
-            self._recover_node_startup_values(connection_properties,
-                                              old_node_startups)
+        ips = []
+        iqns = []
+        for iscsi_transport in self._get_transport():
+            if connection_properties.get('discovery_auth_method'):
+                try:
+                    self._run_iscsiadm_update_discoverydb(connection_properties,
+                                                          iscsi_transport)
+                except putils.ProcessExecutionError as exception:
+                    # iscsiadm returns 6 for "db record not found"
+                    if exception.exit_code == 6:
+                        # Create a new record for this target and update the db
+                        self._run_iscsiadm_bare(
+                            ['-m', 'discoverydb',
+                             '-t', 'sendtargets',
+                             '-p', connection_properties['target_portal'],
+                             '-I', iscsi_transport,
+                             '--op', 'new'],
+                            check_exit_code=[0, 255])
+                        self._run_iscsiadm_update_discoverydb(
+                            connection_properties
+                        )
+                    else:
+                        LOG.error("Unable to find target portal: "
+                                  "%(target_portal)s.",
+                                  {'target_portal': connection_properties[
+                                      'target_portal']})
+                        raise
+                old_node_startups = self._get_node_startup_values(
+                    connection_properties)
+                out = self._run_iscsiadm_bare(
+                    ['-m', 'discoverydb',
+                     '-t', 'sendtargets',
+                     '-I', iscsi_transport,
+                     '-p', connection_properties['target_portal'],
+                     '--discover'],
+                    check_exit_code=[0, 255])[0] or ""
+                self._recover_node_startup_values(connection_properties,
+                                                  old_node_startups)
+            else:
+                old_node_startups = self._get_node_startup_values(
+                    connection_properties)
+                out = self._run_iscsiadm_bare(
+                    ['-m', 'discovery',
+                     '-t', 'sendtargets',
+                     '-I', iscsi_transport,
+                     '-p', connection_properties['target_portal']],
+                    check_exit_code=[0, 255])[0] or ""
+                self._recover_node_startup_values(connection_properties,
+                                                  old_node_startups)
 
-        ips, iqns = self._get_target_portals_from_iscsiadm_output(out)
+            iface_ips, iface_iqns = self._get_target_portals_from_iscsiadm_output(out)
+            ips.append(iface_ips)
+            iqns.append(iface_iqns)
+
         luns = self._get_luns(connection_properties, iqns)
         return list(zip(ips, iqns, luns))
 
@@ -565,8 +574,9 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
                 'stopped_threads': 0, 'found_devices': [],
                 'just_added_devices': []}
 
+        iface = self._get_transport()[0] # no multipath: use first interface
         for props in self._iterate_all_targets(connection_properties):
-            self._connect_vol(self.device_scan_attempts, props, data)
+            self._connect_vol(self.device_scan_attempts, props, data, iface)
             found_devs = data['found_devices']
             if found_devs:
                 for __ in range(10):
@@ -590,7 +600,7 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
 
         raise exception.VolumeDeviceNotFound(device='')
 
-    def _connect_vol(self, rescans, props, data):
+    def _connect_vol(self, rescans, props, data, iface):
         """Make a connection to a volume, send scans and wait for the device.
 
         This method is specifically designed to support multithreading and
@@ -620,10 +630,11 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
         :param rescans: Number of rescans to perform before giving up.
         :param props: Properties of the connection.
         :param data: Shared data.
+        :param iface: iSCSI interface name.
         """
         device = hctl = None
         portal = props['target_portal']
-        session, manual_scan = self._connect_to_iscsi_portal(props)
+        session, manual_scan = self._connect_to_iscsi_portal(props, iface)
         do_scans = rescans > 0 or manual_scan
         # Scan is sent on connect by iscsid, but we must do it manually on
         # manual scan mode.  This scan cannot count towards total rescans.
@@ -709,18 +720,19 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
         # Launch individual threads for each session with the own properties
         retries = self.device_scan_attempts
         threads = []
-        for ip, iqn, lun in ips_iqns_luns:
-            props = connection_properties.copy()
-            props.update(target_portal=ip, target_iqn=iqn, target_lun=lun)
+        for iface in self._get_transport():
+            for ip, iqn, lun in ips_iqns_luns:
+                props = connection_properties.copy()
+                props.update(target_portal=ip, target_iqn=iqn, target_lun=lun)
 
-            # NOTE(yenai): The method _connect_vol is used for parallelize
-            # logins, we shouldn't give these arguments; and it will make a
-            # mess in the debug message in _connect_vol. So, kick them out:
-            for key in ('target_portals', 'target_iqns', 'target_luns'):
-                props.pop(key, None)
+                # NOTE(yenai): The method _connect_vol is used for parallelize
+                # logins, we shouldn't give these arguments; and it will make a
+                # mess in the debug message in _connect_vol. So, kick them out:
+                for key in ('target_portals', 'target_iqns', 'target_luns'):
+                    props.pop(key, None)
 
-            threads.append(executor.Thread(target=self._connect_vol,
-                                           args=(retries, props, data)))
+                threads.append(executor.Thread(target=self._connect_vol,
+                                               args=(retries, props, data, iface)))
         for thread in threads:
             thread.start()
 
@@ -948,22 +960,24 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
                 self._linuxscsi.process_lun_id(lun))
 
     def _get_device_path(self, connection_properties):
-        if self._get_transport() == "default":
-            return ["/dev/disk/by-path/ip-%s-iscsi-%s-lun-%s" %
-                    self._munge_portal(x) for x in
-                    self._get_all_targets(connection_properties)]
-        else:
-            # we are looking for paths in the format :
-            # /dev/disk/by-path/
-            # pci-XXXX:XX:XX.X-ip-PORTAL:PORT-iscsi-IQN-lun-LUN_ID
-            device_list = []
-            for x in self._get_all_targets(connection_properties):
-                look_for_device = glob.glob(
-                    '/dev/disk/by-path/*ip-%s-iscsi-%s-lun-%s' %
-                    self._munge_portal(x))
-                if look_for_device:
-                    device_list.extend(look_for_device)
-            return device_list
+        device_list = []
+        for transport in self._get_transport():
+            if transport == "default":
+                device_list.extend(["/dev/disk/by-path/ip-%s-iscsi-%s-lun-%s" %
+                        self._munge_portal(x) for x in
+                        self._get_all_targets(connection_properties)])
+            else:
+                # we are looking for paths in the format :
+                # /dev/disk/by-path/
+                # pci-XXXX:XX:XX.X-ip-PORTAL:PORT-iscsi-IQN-lun-LUN_ID
+                for x in self._get_all_targets(connection_properties):
+                    look_for_device = glob.glob(
+                        '/dev/disk/by-path/*ip-%s-iscsi-%s-lun-%s' %
+                        self._munge_portal(x))
+                    if look_for_device:
+                        device_list.extend(look_for_device)
+
+        return device_list
 
     def get_initiator(self):
         """Secure helper to read file as root."""
@@ -1021,8 +1035,8 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
                 iqns.append(data[1])
         return ips, iqns
 
-    def _connect_to_iscsi_portal(self, connection_properties):
-        """Connect to an iSCSI portal-target an return the session id."""
+    def _connect_to_iscsi_portal(self, connection_properties, iface):
+        """Connect to an iSCSI portal-target and return the session id."""
         portal = connection_properties['target_portal'].split(",")[0]
         target_iqn = connection_properties['target_iqn']
 
@@ -1038,7 +1052,7 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
                                       check_exit_code=(0, 21, 255))
         if err:
             self._run_iscsiadm(connection_properties,
-                               ('--interface', self._get_transport(),
+                               ('--interface', iface,
                                 '--op', 'new'))
         # Try to set the scan mode to manual
         res = self._iscsiadm_update(connection_properties,
