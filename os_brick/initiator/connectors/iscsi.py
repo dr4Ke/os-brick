@@ -132,12 +132,24 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
         # Parse and clean the output from iscsiadm, which is in the form of:
         # transport_name: [session_id] ip_address:port,tpgt iqn node_type
         lines = []
+        values = {}
         for line in out.splitlines():
-            if line:
-                info = line.split()
-                sid = info[1][1:-1]
-                portal, tpgt = info[2].split(',')
-                lines.append((info[0], sid, portal, tpgt, info[3]))
+            line = line.strip()
+            if line.startswith('Target:'):
+                values['target'] = line.split()[1]
+            elif line.startswith('Current Portal:'):
+                values['portal'], values['tpgt'] = line.split()[1].split(',')
+            elif line.startswith('Iface Name:'):
+                values['iface'] = line.split()[1]
+            elif line.startswith('Iface Transport:'):
+                values['transport'] = line.split()[1]
+            elif line.startswith('SID:'):
+                values['sid'] = line.split()[1]
+            elif line == 'iSCSI Session State: LOGGED_IN':
+                lines.append((values['transport'] + ':',
+                              values['sid'], values['portal'],
+                              values['tpgt'], values['target'],
+                              values['iface']))
         return lines
 
     def _get_iscsi_nodes(self):
@@ -1089,7 +1101,8 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
             for s in sessions:
                 # Found our session, return session_id
                 if (s[0] in self.VALID_SESSIONS_PREFIX and
-                        portal.lower() == s[2].lower() and s[4] == target_iqn):
+                        portal.lower() == s[2].lower() and
+                        s[5] == iface and s[4] == target_iqn):
                     return s[1], manual_scan
 
             try:
@@ -1129,9 +1142,9 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
                 self._disconnect_from_iscsi_portal(props)
 
     def _run_iscsi_session(self):
-        (out, err) = self._run_iscsiadm_bare(('-m', 'session'),
+        (out, err) = self._run_iscsiadm_bare(('-m', 'session', '-P1'),
                                              check_exit_code=[0, 21, 255])
-        LOG.debug("iscsi session list stdout=%(out)s stderr=%(err)s",
+        LOG.debug("iscsi session list details stdout=%(out)s stderr=%(err)s",
                   {'out': out, 'err': err})
         return (out, err)
 
