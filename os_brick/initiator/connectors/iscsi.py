@@ -64,6 +64,7 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
             if valid_iface not in ifaces:
                 ifaces.append(valid_iface)
         self.transport = ifaces
+        LOG.debug('using iscsi ifaces: %s', ','.join(ifaces))
 
     @staticmethod
     def get_connector_properties(root_helper, *args, **kwargs):
@@ -312,6 +313,7 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
         return 'default'
 
     def _get_transport(self):
+        LOG.debug("_get_transport returning %s", ','.join(self.transport))
         return self.transport
 
     @staticmethod
@@ -731,6 +733,7 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
                 for key in ('target_portals', 'target_iqns', 'target_luns'):
                     props.pop(key, None)
 
+                LOG.debug('create thread for %s: %s, %s, %s', iface, ip, iqn, lun)
                 threads.append(executor.Thread(target=self._connect_vol,
                                                args=(retries, props, data, iface)))
         for thread in threads:
@@ -1047,7 +1050,7 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
         #             we run --op new. This will also happen if another
         #             volume is using the same target.
         # iscsiadm returns 21 for "No records found" after version 2.0-871
-        LOG.info("Trying to connect to iSCSI portal %s", portal)
+        LOG.info("Trying to connect to iSCSI portal %s, with iface %s", portal, iface)
         out, err = self._run_iscsiadm(connection_properties, (),
                                       check_exit_code=(0, 21, 255))
         if err:
