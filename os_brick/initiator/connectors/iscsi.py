@@ -746,9 +746,11 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
         # - We have finished in all threads, logged in, found some device, and
         #   10 seconds have passed, which should be enough with up to 10%
         #   network package drops.
-        while not ((len(ips_iqns_luns) == data['stopped_threads'] and
+        num_path = len(ips_iqns_luns) * len(self._get_transport())
+        LOG.debug('loop waiting for %d paths', num_path)
+        while not ((num_path == data['stopped_threads'] and
                     not found) or
-                   (mpath and len(ips_iqns_luns) == data['num_logins'] +
+                   (mpath and num_path == data['num_logins'] +
                     data['failed_logins'])):
             # We have devices but we don't know the wwn yet
             if not wwn and found:
@@ -771,7 +773,7 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
                         mpath = self._linuxscsi.find_sysfs_multipath_dm(found)
             # Give some extra time after all threads have finished.
             if (not last_try_on and found and
-                    len(ips_iqns_luns) == data['stopped_threads']):
+                    num_path == data['stopped_threads']):
                 LOG.debug('All connection threads finished, giving 10 seconds '
                           'for dm to appear.')
                 last_try_on = time.time() + 10
@@ -1051,7 +1053,7 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
         #             volume is using the same target.
         # iscsiadm returns 21 for "No records found" after version 2.0-871
         LOG.info("Trying to connect to iSCSI portal %s, with iface %s", portal, iface)
-        out, err = self._run_iscsiadm(connection_properties, (),
+        out, err = self._run_iscsiadm(connection_properties, ('--interface', iface),
                                       check_exit_code=(0, 21, 255))
         if err:
             self._run_iscsiadm(connection_properties,
@@ -1093,7 +1095,8 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
             try:
                 # exit_code=15 means the session already exists, so it should
                 # be regarded as successful login.
-                self._run_iscsiadm(connection_properties, ("--login",),
+                self._run_iscsiadm(connection_properties,
+                                   ('--interface', iface, "--login"),
                                    check_exit_code=(0, 15, 255))
             except putils.ProcessExecutionError as err:
                 LOG.warning('Failed to login iSCSI target %(iqn)s on portal '
