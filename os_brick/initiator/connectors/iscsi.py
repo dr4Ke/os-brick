@@ -1015,6 +1015,7 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
         check_exit_code = kwargs.pop('check_exit_code', 0)
         attempts = kwargs.pop('attempts', 1)
         delay_on_retry = kwargs.pop('delay_on_retry', True)
+        LOG.debug('running iscsiadm -m node -T IQN -p TARGET %s', iscsi_command)
         (out, err) = self._execute('iscsiadm', '-m', 'node', '-T',
                                    connection_properties['target_iqn'],
                                    '-p',
@@ -1093,11 +1094,13 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
                                   "node.session.auth.password",
                                   connection_properties['auth_password'])
 
-        # We exit once we are logged in or once we fail login
-        while True:
+        # We will try 3 times to login
+        _try_count = 0
+        while true:
             # Duplicate logins crash iscsiadm after load, so we scan active
             # sessions to see if the node is logged in.
             sessions = self._get_iscsi_sessions_full()
+            LOG.debug('active sessions: %s', sessions)
             for s in sessions:
                 # Found our session, return session_id
                 if (s[0] in self.VALID_SESSIONS_PREFIX and
@@ -1112,14 +1115,22 @@ class ISCSIConnector(base.BaseLinuxConnector, base_iscsi.BaseISCSIConnector):
                                    ('--interface', iface, "--login"),
                                    check_exit_code=(0, 15, 255))
             except putils.ProcessExecutionError as err:
-                LOG.warning('Failed to login iSCSI target %(iqn)s on portal '
-                            '%(portal)s (exit code %(err)s).',
-                            {'iqn': target_iqn, 'portal': portal,
-                             'err': err.exit_code})
-                return None, None
-            self._iscsiadm_update(connection_properties,
-                                  "node.startup",
-                                  "automatic")
+                if err.exit_code == 21 and _try_count < 3:
+                    LOG.debug('login failed, will try again')
+                    self._run_iscsiadm(connection_properties,
+                                       ('--interface', iface,
+                                        '--op', 'new'))
+                else:
+                    LOG.warning('Failed to login iSCSI target %(iqn)s on portal '
+                                '%(portal)s (exit code %(err)s).',
+                                {'iqn': target_iqn, 'portal': portal,
+                                 'err': err.exit_code})
+                    return None, None
+            _try_count += 1
+
+        self._iscsiadm_update(connection_properties,
+                              "node.startup",
+                              "automatic")
 
     def _disconnect_from_iscsi_portal(self, connection_properties):
         self._iscsiadm_update(connection_properties, "node.startup", "manual",
